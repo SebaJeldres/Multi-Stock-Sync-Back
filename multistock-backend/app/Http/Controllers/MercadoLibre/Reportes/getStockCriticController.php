@@ -108,15 +108,19 @@ class getStockCriticController
                 ]);
                 // Si la solicitud falla, devolver un mensaje de error
                 if ($refreshResponse->failed()) {
-                    return response()->json(['error' => 'No se pudo refrescar el token'], 401);
+                    return response()->json([
+                        'status' => 'error',
+                        'message' => 'El token ha expirado y no se pudo refrescar',
+                        'error' => $refreshResponse->json(),
+                    ], 401);
                 }
 
-                $data = $refreshResponse->json();
-                $credentials->update([
-                    'access_token' => $data['access_token'],
-                    'refresh_token' => $data['refresh_token'],
-                    'expires_at' => now()->addSeconds($data['expires_in']),
-                ]);
+                $newTokenData = $refreshResponse->json();
+                $credentials->access_token = $newTokenData['access_token'];
+                $credentials->refresh_token = $newTokenData['refresh_token'] ?? $credentials->refresh_token;
+                $credentials->expires_in = $newTokenData['expires_in'];
+                $credentials->updated_at = now();
+                $credentials->save();
             }
         } catch (\Exception $e) {
             return response()->json([
@@ -129,6 +133,34 @@ class getStockCriticController
 
         $userResponse = Http::withToken($credentials->access_token)
             ->get('https://api.mercadolibre.com/users/me');
+
+        // If it fails by token, try refreshing again
+        if ($userResponse->status() === 401) {
+            $refreshResponse = Http::asForm()->post('https://api.mercadolibre.com/oauth/token', [
+                'grant_type' => 'refresh_token',
+                'client_id' => $credentials->client_id,
+                'client_secret' => $credentials->client_secret,
+                'refresh_token' => $credentials->refresh_token,
+            ]);
+
+            if ($refreshResponse->failed()) {
+                return response()->json([
+                    'status' => 'error',
+                    'message' => 'El token ha expirado y no se pudo refrescar',
+                    'error' => $refreshResponse->json(),
+                ], 401);
+            }
+
+            $newTokenData = $refreshResponse->json();
+            $credentials->access_token = $newTokenData['access_token'];
+            $credentials->refresh_token = $newTokenData['refresh_token'] ?? $credentials->refresh_token;
+            $credentials->expires_in = $newTokenData['expires_in'];
+            $credentials->updated_at = now();
+            $credentials->save();
+
+            // Retry the request
+            $userResponse = Http::withToken($credentials->access_token)->get('https://api.mercadolibre.com/users/me');
+        }
 
         if ($userResponse->failed()) {
             return response()->json([

@@ -265,8 +265,8 @@ class getTopSellingProductsController
             'data' => $productSales,
         ]);
 
-        // Guardar en cache por 1 hora (3600 segundos)
-        cache()->put($cacheKey, $responseData, 3600);
+        // Guardar en cache por 10 minutos (600 segundos)
+        cache()->put($cacheKey, $responseData, 600);
 
         return response()->json($responseData);
     }
