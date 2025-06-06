@@ -16,15 +16,15 @@ class getCompaniesProductsController extends Controller
     {
         $clientIds = Company::whereNotNull('client_id')->pluck('client_id')->toArray();
 
-        // Obtener año y mes desde la query, por defecto actual
+        // Obtener año y mes desde la query
         
         $year = (int) $request->query('year', date('Y'));
         $month = (int) $request->query('month', date('m'));
 
-        // Calcular el rango: primer día del mes anterior al último día del mes posterior
-        $start = \Carbon\Carbon::create($year, $month, 1)->subMonth()->startOfMonth();
-        $end = \Carbon\Carbon::create($year, $month, 1)->addMonth()->endOfMonth();
-
+        
+        $start = \Carbon\Carbon::create($year, $month, 1)->startOfMonth();
+        $end = \Carbon\Carbon::create($year, $month, 1)->endOfMonth();
+        
         $dateFrom = $start->toIso8601String();
         $dateTo = $end->toIso8601String();
 
@@ -72,81 +72,105 @@ class getCompaniesProductsController extends Controller
             $userId = $userResponse->json()['id'];
             Log::info("Obtenido user_id para client_id: $clientId", ['user_id' => $userId]);
 
-            $params = [
-                'seller' => $userId,
-                'order.status' => 'paid',
-                'order.date_created.from' => $dateFrom,
-                'order.date_created.to' => $dateTo,
-                'limit' => 20,
-                'offset' => 0
-            ];
-
-            $promises[$clientId] = $client->getAsync('https://api.mercadolibre.com/orders/search', [
-                'headers' => [
-                    'Authorization' => 'Bearer ' . $credentials->access_token,
-                ],
-                'query' => $params
-            ]);
-        }
-
-        $results = Promise\Utils::settle($promises)->wait();
-
-        // Agrupar ventas por mes
-        $salesByMonth = [];
-        foreach ($results as $clientId => $result) {
-            if ($result['state'] === 'fulfilled' && $result['value']->getStatusCode() === 200) {
-                $data = json_decode($result['value']->getBody()->getContents(), true);
-                if (isset($data['results']) && is_array($data['results'])) {
-                    foreach ($data['results'] as $order) {
-                        if (!isset($order['order_items']) || !is_array($order['order_items'])) continue;
-                        $orderMonth = \Carbon\Carbon::parse($order['date_created'])->format('Y-m');
-                        if (!isset($salesByMonth[$orderMonth])) {
-                            $salesByMonth[$orderMonth] = [
-                                'total_sales' => 0,
-                                'orders' => []
-                            ];
+            $limit = 50;
+            $page = 0;
+            $hasMore = true;
+            $clientOrders = [];
+            while ($hasMore && $page < 20) {
+                $params = [
+                    'seller' => $userId,
+                    'order.status' => 'paid',
+                    'order.date_created.from' => $dateFrom,
+                    'order.date_created.to' => $dateTo,
+                    'limit' => $limit,
+                    'offset' => $page * $limit
+                ];
+                $response = $client->get('https://api.mercadolibre.com/orders/search', [
+                    'headers' => [
+                        'Authorization' => 'Bearer ' . $credentials->access_token,
+                    ],
+                    'query' => $params
+                ]);
+                if ($response->getStatusCode() === 200) {
+                    $data = json_decode($response->getBody()->getContents(), true);
+                    $results = $data['results'] ?? [];
+                    if (count($results) === 0) {
+                        $hasMore = false;
+                    } else {
+                        $clientOrders = array_merge($clientOrders, $results);
+                        if (count($results) < $limit) {
+                            $hasMore = false;
                         }
-                        if (isset($order['total_amount'])) {
-                            $salesByMonth[$orderMonth]['total_sales'] += $order['total_amount'];
-                            $totalSales += $order['total_amount'];
-                        }
-                        $orderData = [
-                            'id' => $order['id'],
-                            'created_date' => $order['date_created'] ?? null,
-                            'total_amount' => $order['total_amount'] ?? null,
-                            'status' => $order['status'] ?? null,
-                            'products' => []
-                        ];
-                        foreach ($order['order_items'] as $item) {
-                            $orderData['products'][] = [
-                                'title' => $item['item']['title'] ?? null,
-                                'quantity' => $item['quantity'] ?? null,
-                                'price' => $item['unit_price'] ?? null
-                            ];
-                        }
-                        $salesByMonth[$orderMonth]['orders'][] = $orderData;
                     }
+                } else {
+                    $hasMore = false;
                 }
+                $page++;
+            }
+
+            // Procesa $clientOrders igual que antes:
+            foreach ($clientOrders as $order) {
+                $orderDate = \Carbon\Carbon::parse($order['date_created']);
+                if ($orderDate->year != $year || $orderDate->month != $month) {
+                    continue;
+                }
+                $orderMonth = $orderDate->format('Y-m');
+                if (!isset($salesByCompany[$orderMonth][$clientId])) {
+                    $salesByCompany[$orderMonth][$clientId] = [
+                        'total_sales' => 0,
+                        'orders' => []
+                    ];
+                }
+                if (isset($order['total_amount'])) {
+                    $salesByCompany[$orderMonth][$clientId]['total_sales'] += $order['total_amount'];
+                    $totalSales += $order['total_amount'];
+                }
+                $orderData = [
+                    'id' => $order['id'],
+                    'created_date' => $order['date_created'] ?? null,
+                    'total_amount' => $order['total_amount'] ?? null,
+                    'status' => $order['status'] ?? null,
+                    'products' => []
+                ];
+                foreach ($order['order_items'] as $item) {
+                    $orderData['products'][] = [
+                        'title' => $item['item']['title'] ?? null,
+                        'quantity' => $item['quantity'] ?? null,
+                        'price' => $item['unit_price'] ?? null
+                    ];
+                }
+                $salesByCompany[$orderMonth][$clientId]['orders'][] = $orderData;
             }
         }
 
-        // Solo mostrar los 3 meses deseados
-        $monthsToShow = [];
-        for ($i = -1; $i <= 1; $i++) {
-            $targetMonth = \Carbon\Carbon::create($year, $month, 1)->copy()->addMonths($i)->format('Y-m');
-            $monthsToShow[] = $targetMonth;
+       foreach ($salesByCompany as $clientId => &$months) {
+       ksort($months);
+}
+       unset($months);
+
+        foreach ($allSales as $clientId => $clientOrders) {
+            foreach ($clientOrders as $order) {
+                
+            }
         }
-        $salesByMonth = array_filter(
-            $salesByMonth,
-            fn($v, $k) => in_array($k, $monthsToShow),
-            ARRAY_FILTER_USE_BOTH
-        );
-        ksort($salesByMonth);
+
+        
+        $monthKey = sprintf('%04d-%02d', $year, $month);
+        foreach ($clientIds as $clientId) {
+            if (!isset($salesByCompany[$monthKey][$clientId])) {
+                $salesByCompany[$monthKey][$clientId] = [
+                    'total_sales' => 0,
+                    'orders' => []
+                ];
+            }
+            ksort($salesByCompany[$monthKey]);
+        }
+        ksort($salesByCompany);
 
         return response()->json([
             'status' => 'success',
-            'message' => 'Órdenes pagadas agrupadas por mes.',
-            'sales_by_month' => $salesByMonth,
+            'message' => 'Órdenes pagadas agrupadas por empresa',
+            'sales_by_company' => $salesByCompany,
             'total_sales' => $totalSales,
             'date_range' => [
                 'from' => $dateFrom,
@@ -155,3 +179,5 @@ class getCompaniesProductsController extends Controller
         ]);
     }
 }
+
+
